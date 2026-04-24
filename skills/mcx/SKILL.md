@@ -1,6 +1,6 @@
 ---
 name: mcx
-description: Use the local `mcx` CLI to discover and call tools across many MCP servers via lazy-loaded semantic search. Replaces the pattern of registering every MCP server in Claude Code (which dumps hundreds of tool schemas into context). When you need to call a tool that's not already loaded — search first, get the schema, then call. Hybrid BM25 + multilingual embedding handles English and CJK queries.
+description: Local `mcx` CLI to discover and call tools across cataloged MCP backends without loading their schemas. **Search FIRST — BEFORE asking the user clarifying questions — whenever they mention a third-party service, SaaS, or integration you don't already have a loaded tool for** (Feishu/Lark/飞书, Notion, Linear, Slack, Jira, GitLab, Sentry, GitHub, Google Workspace, internal corp APIs, etc.). The "how should I deliver this?" options you'd otherwise invent ("call the API or write markdown?", "approach A or B?") depend on what tools actually exist — guessing wastes the user's time and makes you look like you didn't check. Pattern: `mcx search <intent>` → pick tool → `mcx call`. Hybrid BM25 + multilingual embedding handles English and CJK queries.
 ---
 
 # mcx — MCP Tools CLI
@@ -16,6 +16,20 @@ If `mcx` is not on PATH, **stop and run `/mcx-install`** instead of giving up. T
 ```bash
 command -v mcx || echo "missing — run /mcx-install"
 ```
+
+## Trigger discipline — search BEFORE clarifying
+
+When the user mentions a service, integration, SaaS product, or capability you don't already have a loaded tool for (Feishu/Lark/飞书, Notion, Linear, Slack, Jira, GitLab, Sentry, etc.), do **not** first ask the user to clarify *how* they want it done. The valid set of "how"s depends on what tools actually exist in the catalog — and you don't know that until you search.
+
+**Wrong:**
+> User: "写一篇飞书文档"
+> Claude: "你想要本地生成 Markdown 还是调用飞书 API？" ← fabricated options based on ignorance
+
+**Right:**
+> User: "写一篇飞书文档"
+> Claude: *runs `mcx search "飞书 创建文档"`*, finds `lark-mcp.create_document` + `create_block_children`, then asks only the narrower questions the real tool surface implies (folder_token? title? content source?).
+
+A single `mcx search` is ~0.5s and a few KB of context — cheaper than one wrong clarifying round-trip with the user.
 
 ## When to use mcx
 

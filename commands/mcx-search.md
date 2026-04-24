@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(mcx:*), Bash(command:*), Bash(~/.bun/bin/mcx:*)
-description: Discover the right MCP tool for an intent across all cataloged backends. Hybrid BM25 + multilingual embedding rerank. Returns top-N candidates with description, args, and source-of-rank metadata.
+description: Discover the right MCP tool for an intent across all cataloged backends via hybrid BM25 + multilingual embedding rerank. **Run this FIRST when the user mentions a service, SaaS, or integration (飞书/Lark, Notion, Linear, Slack, Jira, GitLab, Sentry, etc.) you don't already have loaded — BEFORE asking clarifying questions about delivery method, so your follow-ups are grounded in real tool capabilities, not invented options.** Returns top-N candidates with description, args, and rank-source metadata.
 argument-hint: <natural language query>
 ---
 
