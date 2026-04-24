@@ -1,0 +1,18 @@
+{
+  "name": "mcx",
+  "metadata": {
+    "description": "Lazy-loaded MCP tool surface for Claude Code: discover, search, and call tools across many MCP servers without loading every schema upfront. Hybrid BM25 + multilingual embedding rerank, OAuth 2.1 (PKCE+DCR), encrypted token storage, audit receipts. Wraps the mcx CLI."
+  },
+  "owner": {
+    "name": "heggria"
+  },
+  "plugins": [
+    {
+      "name": "mcx",
+      "description": "Slash commands and a routing skill that drive the mcx CLI. Requires the mcx CLI installed separately (run /mcx-install if missing).",
+      "source": "./",
+      "category": "developer-tools",
+      "homepage": "https://github.com/heggria/mcx"
+    }
+  ]
+}

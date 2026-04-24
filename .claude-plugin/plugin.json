@@ -1,0 +1,9 @@
+{
+  "name": "mcx",
+  "description": "Lazy-loaded MCP tool surface for Claude Code: hybrid BM25+embedding search, OAuth 2.1, encrypted token store, audit receipts. Wraps the mcx CLI so Claude only loads N tool schemas instead of hundreds. Run /mcx-install if mcx is missing.",
+  "version": "0.1.0",
+  "author": {
+    "name": "heggria"
+  },
+  "homepage": "https://github.com/heggria/mcx"
+}

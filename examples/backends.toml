@@ -1,0 +1,47 @@
+# mcx backends configuration
+#
+# Each [backend.<name>] section declares an MCP server.
+# Auth tokens are NOT stored here — use `mcx auth set <name> --token ...`
+# which encrypts and stores them in ~/.config/mcx/tokens.enc.
+#
+# This file is parsed strictly: unknown fields are kept but validated; type
+# mismatches will fail loud.
+
+# ── Local stdio backend ────────────────────────────────────────────────
+[backend.chrome-devtools]
+type = "stdio"
+command = "npx"
+args = ["chrome-devtools-mcp@latest"]
+description = "Chrome DevTools — page snapshot, click, navigation, screenshots"
+
+# ── Remote SSE backend with auth header ────────────────────────────────
+[backend.lark-mcp]
+type = "sse"
+url = "https://matrix-overseas-robot.xaminim.com/robot/mcp/lark-mcp/sse"
+description = "Lark/Feishu cloud docs, sheets, bitable, mail, calendar"
+
+[backend.lark-mcp.auth]
+kind = "header"
+name = "X-Intern-Token"
+
+# ── Remote HTTP backend, OAuth 2.1 (browser flow) ─────────────────────
+# Notion's hosted MCP requires OAuth 2.1. Run `mcx auth login notion`
+# once and mcx will: discover the auth server, register a client (DCR),
+# open your browser, and store the access + refresh tokens encrypted.
+[backend.notion]
+type = "http"
+url = "https://mcp.notion.com/mcp"
+description = "Notion — pages, databases, search, comments"
+
+[backend.notion.auth]
+kind = "oauth"
+
+# ── Remote HTTP backend with custom header auth ────────────────────────
+[backend.feishu-project]
+type = "http"
+url = "https://project.feishu.cn/mcp_server/v1"
+description = "Feishu Project — work items, MQL queries, comments, views"
+
+[backend.feishu-project.auth]
+kind = "header"
+name = "X-Mcp-Token"
