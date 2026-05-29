@@ -218,13 +218,41 @@ function parseYamlIsh(src: string): YamlField[] {
     const key = kv[1] ?? '';
     let val = kv[2] ?? '';
 
+    // YAML block scalar indicators: `>` (folded, line breaks → spaces) and `|`
+    // (literal, preserves newlines). Both formats are followed by indented
+    // continuation lines that hold the actual value. We accumulate those lines
+    // and collapse them with single spaces — the embedding pipeline doesn't
+    // care about literal newlines, only the words.
+    const blockScalar = val === '>' || val === '|'
+      || val === '>-' || val === '|-' || val === '>+' || val === '|+';
+    if (blockScalar) {
+      const collect: string[] = [];
+      let j = i + 1;
+      while (j < lines.length) {
+        const next = lines[j] ?? '';
+        if (!next.trim()) {
+          j++;
+          continue;
+        }
+        const nextIndentMatch = next.match(/^(\s*)/);
+        const nextIndent = nextIndentMatch ? (nextIndentMatch[1]?.length ?? 0) : 0;
+        if (nextIndent <= indent) break;
+        collect.push(next.trim());
+        j++;
+      }
+      val = collect.join(' ');
+      out.push({ key, value: val, depth: indent });
+      i = j;
+      continue;
+    }
+
     // Strip quotes from scalar.
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
 
-    // If the value is empty, this might be the start of a block (object/array).
-    // We accumulate everything indented deeper than this line as the "value".
+    // If the value is empty (no `>`/`|` indicator), it might be the start of a
+    // nested object/array. Accumulate everything indented deeper as the value.
     if (!val) {
       const collect: string[] = [];
       let j = i + 1;
