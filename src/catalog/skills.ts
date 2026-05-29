@@ -43,7 +43,11 @@ export interface ScanResult {
 
 export function defaultSkillRoots(cwd?: string): string[] {
   const home = homedir();
-  const roots = [join(home, '.claude', 'skills'), join(home, '.claude', 'skills-pool')];
+  const roots = [
+    join(home, '.claude', 'skills'),
+    join(home, '.claude', 'skills-pool'),
+    join(home, '.agents', 'skills'),
+  ];
   if (cwd) roots.push(join(cwd, '.claude', 'skills'));
   // Plugin marketplaces — each marketplace dir may have its own skills/ subdir.
   return roots;
