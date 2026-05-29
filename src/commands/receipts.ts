@@ -1,8 +1,8 @@
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import type { Command } from 'commander';
-import { existsSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
-import { auditLogPath } from '../util/paths.ts';
 import { withEnvelope } from '../envelope.ts';
 import { callId } from '../util/ids.ts';
+import { auditLogPath } from '../util/paths.ts';
 
 /**
  * Read the last N lines of audit.jsonl efficiently:
@@ -27,16 +27,17 @@ function tailJsonl(path: string, n: number): unknown[] {
       buffer = Buffer.concat([chunk, buffer]);
       lineCount = (buffer.toString('utf8').match(/\n/g) || []).length;
     }
-    const lines = buffer.toString('utf8').split('\n').filter((l) => l.length > 0);
-    return lines
-      .slice(-n)
-      .map((l) => {
-        try {
-          return JSON.parse(l);
-        } catch {
-          return { _malformed: l };
-        }
-      });
+    const lines = buffer
+      .toString('utf8')
+      .split('\n')
+      .filter((l) => l.length > 0);
+    return lines.slice(-n).map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return { _malformed: l };
+      }
+    });
   } finally {
     closeSync(fd);
   }

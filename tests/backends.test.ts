@@ -85,7 +85,9 @@ describe('backends.toml schema', () => {
   });
 
   test('loadBackends throws config_missing for nonexistent file', () => {
-    expect(() => loadBackends('/nonexistent/path/backends.toml')).toThrow(/backends.toml not found/);
+    expect(() => loadBackends('/nonexistent/path/backends.toml')).toThrow(
+      /backends.toml not found/,
+    );
   });
 
   test('loadBackends throws config_invalid on bad toml', () => {

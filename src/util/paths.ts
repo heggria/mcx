@@ -1,6 +1,6 @@
+import { mkdirSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
 
 /**
  * XDG-compliant path resolution.

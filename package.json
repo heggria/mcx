@@ -1,7 +1,7 @@
 {
   "name": "mcx",
-  "version": "0.1.0",
-  "description": "MCP Tools CLI — semantic search + lazy load + audit for MCP servers",
+  "version": "0.2.0",
+  "description": "Unified catalog CLI for MCP tools AND Claude skills — semantic search + lazy load + audit",
   "type": "module",
   "bin": {
     "mcx": "./dist/cli.js"

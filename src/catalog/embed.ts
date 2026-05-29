@@ -67,9 +67,7 @@ async function makeLocalEmbedder(): Promise<Embedder> {
     model: `local:${modelId}`,
     dim: 384, // both default models we use are 384-d
     embed: async (texts: string[], inputType: InputType = 'passage'): Promise<Float32Array[]> => {
-      const prepared = useE5Prefix
-        ? texts.map((t) => `${inputType}: ${t}`)
-        : texts;
+      const prepared = useE5Prefix ? texts.map((t) => `${inputType}: ${t}`) : texts;
       // Process one at a time to keep memory bounded; transformers.js batches internally.
       const out: Float32Array[] = [];
       for (const t of prepared) {
@@ -156,11 +154,12 @@ export function cosine(a: Float32Array, b: Float32Array): number {
   return s;
 }
 
-/** Build the text we embed for a tool: name + description + arg names/descriptions. */
+/** Build the text we embed for an entity (tool or skill). */
 export function embeddableText(t: {
   name: string;
   description?: string | null;
   args_text?: string | null;
+  triggers?: string | null;
 }): string {
-  return [t.name, t.description, t.args_text].filter(Boolean).join('\n').slice(0, 4000);
+  return [t.name, t.description, t.args_text, t.triggers].filter(Boolean).join('\n').slice(0, 4000);
 }

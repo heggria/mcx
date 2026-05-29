@@ -1,5 +1,5 @@
-import { appendFileSync, openSync, closeSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { appendFileSync, closeSync, openSync, statSync } from 'node:fs';
 import { auditLogPath, ensureDirs } from './util/paths.ts';
 
 /**

@@ -39,10 +39,10 @@ describe('base64url encoding', () => {
     const orig = Buffer.from('hello world');
     const enc = base64url(orig);
     // Reverse: pad and unswap
-    const padded = enc.replace(/-/g, '+').replace(/_/g, '/').padEnd(
-      Math.ceil(enc.length / 4) * 4,
-      '=',
-    );
+    const padded = enc
+      .replace(/-/g, '+')
+      .replace(/_/g, '/')
+      .padEnd(Math.ceil(enc.length / 4) * 4, '=');
     const dec = Buffer.from(padded, 'base64');
     expect(dec.toString('utf8')).toBe('hello world');
   });

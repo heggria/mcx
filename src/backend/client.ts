@@ -1,10 +1,10 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { Backend } from '../config/backends.ts';
-import { createStdioTransport } from './stdio.ts';
+import { log } from '../util/log.ts';
 import { createHttpTransport } from './http.ts';
 import { createSseTransport } from './sse.ts';
-import { log } from '../util/log.ts';
+import { createStdioTransport } from './stdio.ts';
 
 const CLIENT_INFO = { name: 'mcx', version: '0.1.0' };
 const CLIENT_OPTIONS = { capabilities: {} };
@@ -121,9 +121,9 @@ export async function connect(serverName: string, backend: Backend): Promise<Con
 }
 
 /** Page through `tools/list` until the cursor is exhausted. */
-export async function listAllTools(client: Client): Promise<
-  Array<{ name: string; description?: string; inputSchema?: unknown }>
-> {
+export async function listAllTools(
+  client: Client,
+): Promise<Array<{ name: string; description?: string; inputSchema?: unknown }>> {
   const collected: Array<{ name: string; description?: string; inputSchema?: unknown }> = [];
   let cursor: string | undefined;
   do {

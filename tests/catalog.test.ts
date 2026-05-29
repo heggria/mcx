@@ -27,7 +27,11 @@ describe('catalog store', () => {
   test('replaceTools inserts servers and tools, populates FTS', () => {
     openCatalog();
     replaceTools('s1', 'http', 'https://e.x', [
-      { name: 't1', description: 'first tool', inputSchema: { properties: { a: { description: 'x' } } } },
+      {
+        name: 't1',
+        description: 'first tool',
+        inputSchema: { properties: { a: { description: 'x' } } },
+      },
       { name: 't2', description: 'second tool', inputSchema: { properties: { b: {} } } },
     ]);
     const servers = listServers();
@@ -72,7 +76,11 @@ describe('catalog store', () => {
   test('searchTools returns BM25-ranked results, name-weighted highest', () => {
     openCatalog();
     replaceTools('notion', 'http', null, [
-      { name: 'create_page', description: 'Create a Notion page', inputSchema: { properties: { title: {} } } },
+      {
+        name: 'create_page',
+        description: 'Create a Notion page',
+        inputSchema: { properties: { title: {} } },
+      },
       { name: 'search', description: 'Semantic search across the workspace' },
       { name: 'fetch', description: 'Fetch a page by id' },
     ]);

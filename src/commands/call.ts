@@ -1,10 +1,10 @@
 import type { Command } from 'commander';
+import { writeAudit } from '../audit.ts';
 import { connect } from '../backend/client.ts';
-import { loadBackends, getBackend } from '../config/backends.ts';
 import { findTool } from '../catalog/store.ts';
+import { getBackend, loadBackends } from '../config/backends.ts';
 import { withEnvelope } from '../envelope.ts';
 import { callId } from '../util/ids.ts';
-import { writeAudit } from '../audit.ts';
 
 export function registerCallCommand(program: Command): void {
   program
@@ -22,14 +22,14 @@ export function registerCallCommand(program: Command): void {
         let parsedArgs: Record<string, unknown>;
         try {
           parsedArgs =
-            args && args.trim().length > 0
-              ? (JSON.parse(args) as Record<string, unknown>)
-              : {};
+            args && args.trim().length > 0 ? (JSON.parse(args) as Record<string, unknown>) : {};
           if (parsedArgs === null || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
             throw new Error('args must be a JSON object');
           }
         } catch (e) {
-          const err = new Error(`failed to parse args as JSON: ${(e as Error).message}`) as Error & {
+          const err = new Error(
+            `failed to parse args as JSON: ${(e as Error).message}`,
+          ) as Error & {
             code?: string;
           };
           err.code = 'invalid_args';

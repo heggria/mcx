@@ -19,9 +19,7 @@ export interface AuthTokenRow {
 }
 
 export function getEncryptedToken(server: string): AuthTokenRow | undefined {
-  const r = openCatalog()
-    .query('SELECT * FROM auth_tokens WHERE server = ?')
-    .get(server);
+  const r = openCatalog().query('SELECT * FROM auth_tokens WHERE server = ?').get(server);
   return (r ?? undefined) as AuthTokenRow | undefined;
 }
 

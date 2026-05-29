@@ -19,9 +19,9 @@ import { execSync } from 'node:child_process';
 import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname, platform } from 'node:os';
+import { join } from 'node:path';
 import { openCatalog } from '../catalog/store.ts';
 import { configDir, ensureDirs } from '../util/paths.ts';
-import { join } from 'node:path';
 
 const ALGO = 'aes-256-gcm';
 const KEY_LEN = 32;
@@ -100,9 +100,11 @@ export function setToken(server: string, plaintext: string): void {
 export async function decryptRaw(server: string): Promise<string | null> {
   const row = openCatalog()
     .query('SELECT ciphertext, iv, tag FROM auth_tokens WHERE server = ?')
-    .get(server) as
-    | { ciphertext: Buffer | Uint8Array; iv: Buffer | Uint8Array; tag: Buffer | Uint8Array }
-    | null;
+    .get(server) as {
+    ciphertext: Buffer | Uint8Array;
+    iv: Buffer | Uint8Array;
+    tag: Buffer | Uint8Array;
+  } | null;
   if (!row) return null;
   const key = masterKey();
   const decipher = createDecipheriv(ALGO, key, Buffer.from(row.iv));

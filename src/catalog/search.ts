@@ -1,15 +1,16 @@
 import { cosine, getEmbedder } from './embed.ts';
 import {
+  type EntityKind,
+  type EntityRow,
   allEmbeddings,
   embeddingStats,
   getEmbeddings,
-  getToolsByIds,
-  searchTools as bm25Search,
-  type ToolRow,
+  getEntitiesByIds,
+  searchEntities,
 } from './store.ts';
 
 /**
- * Hybrid search: BM25 candidates → embedding rerank → top-N.
+ * Hybrid search over the unified entity catalog (tools + skills).
  *
  * Strategy:
  *   1. BM25 over FTS5 picks `rerankTop` candidates fast (works for English keywords).
@@ -19,13 +20,13 @@ import {
  *
  * Each result reports:
  *   - score (the final ranking score: cosine when reranked, BM25 otherwise)
- *   - bm25_score (always present when the tool came from BM25)
- *   - cosine (present when the tool was embedded)
+ *   - bm25_score (always present when the entity came from BM25)
+ *   - cosine (present when the entity was embedded)
  *   - rank_source: 'hybrid' | 'cosine_only' | 'bm25_only'
  */
 
 export interface HybridResult {
-  tool: ToolRow;
+  entity: EntityRow;
   score: number;
   bm25_score: number | null;
   cosine: number | null;
@@ -35,7 +36,8 @@ export interface HybridResult {
 export interface HybridOptions {
   topN?: number;
   rerankTop?: number;
-  server?: string;
+  kind?: EntityKind;
+  source?: string;
   noEmbed?: boolean;
 }
 
@@ -54,16 +56,17 @@ export async function hybridSearch(query: string, opts: HybridOptions = {}): Pro
   const rerankTop = Math.max(topN, Math.min(200, opts.rerankTop ?? 20));
   const notes: string[] = [];
 
-  const bm25 = bm25Search(query, { topN: rerankTop, server: opts.server });
+  const bm25Opts: { topN: number; kind?: EntityKind; source?: string } = { topN: rerankTop };
+  if (opts.kind) bm25Opts.kind = opts.kind;
+  if (opts.source) bm25Opts.source = opts.source;
+  const bm25 = searchEntities(query, bm25Opts);
 
-  // Pure-BM25 mode (explicit opt-out OR no embeddings ever generated).
   if (opts.noEmbed) {
     return {
       results: bm25.slice(0, topN).map((r) => {
-        // Strip the score field from the joined row for cleanliness.
-        const { score, ...tool } = r;
+        const { score, ...entity } = r;
         return {
-          tool: tool as ToolRow,
+          entity: entity as EntityRow,
           score,
           bm25_score: score,
           cosine: null,
@@ -79,17 +82,14 @@ export async function hybridSearch(query: string, opts: HybridOptions = {}): Pro
     };
   }
 
-  // Discover embedder + model availability without paying for the model load
-  // until we know we'll actually use it.
-  let embedder: Awaited<ReturnType<typeof getEmbedder>> | null = null;
   let stats = embeddingStats();
   if (stats.embedded === 0) {
     notes.push('no embeddings in catalog — falling back to BM25 only. Run: mcx embed');
     return {
       results: bm25.slice(0, topN).map((r) => {
-        const { score, ...tool } = r;
+        const { score, ...entity } = r;
         return {
-          tool: tool as ToolRow,
+          entity: entity as EntityRow,
           score,
           bm25_score: score,
           cosine: null,
@@ -105,18 +105,17 @@ export async function hybridSearch(query: string, opts: HybridOptions = {}): Pro
     };
   }
 
-  embedder = await getEmbedder();
+  const embedder = await getEmbedder();
   stats = embeddingStats(embedder.model);
   if (stats.embedded === 0) {
     notes.push(
       `no embeddings for active model '${embedder.model}'. Switch model or run: mcx embed`,
     );
-    // Best effort: BM25 only.
     return {
       results: bm25.slice(0, topN).map((r) => {
-        const { score, ...tool } = r;
+        const { score, ...entity } = r;
         return {
-          tool: tool as ToolRow,
+          entity: entity as EntityRow,
           score,
           bm25_score: score,
           cosine: null,
@@ -139,21 +138,19 @@ export async function hybridSearch(query: string, opts: HybridOptions = {}): Pro
   if (bm25.length >= topN) {
     const ids = bm25.map((r) => r.id);
     const embeds = getEmbeddings(ids, embedder.model);
-    const bm25ById = new Map(bm25.map((r) => [r.id, r]));
 
     const reranked: HybridResult[] = bm25.map((r) => {
       const v = embeds.get(r.id);
       const c = v ? cosine(queryVec, v) : null;
-      const { score, ...tool } = r;
+      const { score, ...entity } = r;
       return {
-        tool: tool as ToolRow,
-        score: c ?? score, // prefer cosine when present
+        entity: entity as EntityRow,
+        score: c ?? score,
         bm25_score: score,
         cosine: c,
         rank_source: c !== null ? 'hybrid' : 'bm25_only',
       };
     });
-    // Sort: rows with cosine first (descending), then BM25-only by ascending bm25 score.
     reranked.sort((a, b) => {
       if (a.cosine !== null && b.cosine !== null) return b.cosine - a.cosine;
       if (a.cosine !== null) return -1;
@@ -171,27 +168,34 @@ export async function hybridSearch(query: string, opts: HybridOptions = {}): Pro
     };
   }
 
-  // Path B: BM25 returned too few (e.g. Chinese query) → cosine over all embeddings.
-  const all = allEmbeddings(embedder.model);
-  const scored = all.map((e) => ({ tool_id: e.tool_id, cosine: cosine(queryVec, e.vec) }));
+  // Path B: BM25 returned too few → cosine over all embeddings (optionally kind-filtered).
+  const all = allEmbeddings(embedder.model, opts.kind);
+  const scored = all.map((e) => ({ entity_id: e.entity_id, cosine: cosine(queryVec, e.vec) }));
   scored.sort((a, b) => b.cosine - a.cosine);
-  const top = scored.slice(0, topN);
-  const tools = getToolsByIds(top.map((s) => s.tool_id));
+  // Take a few extra so post-filter (source) still has room to fill topN.
+  const top = scored.slice(0, topN * 3);
+  const entities = getEntitiesByIds(top.map((s) => s.entity_id));
   const bm25Score = new Map(bm25.map((r) => [r.id, r.score]));
 
-  return {
-    results: top.map((s) => {
-      const tool = tools.find((t) => t.id === s.tool_id);
-      if (!tool) throw new Error(`tool ${s.tool_id} disappeared from catalog mid-search`);
-      const bm = bm25Score.get(s.tool_id) ?? null;
+  const results = top
+    .map((s) => {
+      const entity = entities.find((t) => t.id === s.entity_id);
+      if (!entity) return null;
+      if (opts.source && entity.source !== opts.source) return null;
+      const bm = bm25Score.get(s.entity_id) ?? null;
       return {
-        tool,
+        entity,
         score: s.cosine,
         bm25_score: bm,
         cosine: s.cosine,
         rank_source: bm !== null ? 'hybrid' : 'cosine_only',
-      };
-    }),
+      } as HybridResult;
+    })
+    .filter((r): r is HybridResult => r !== null)
+    .slice(0, topN);
+
+  return {
+    results,
     bm25_hits: bm25.length,
     embedded_used: true,
     cosine_fallback_used: true,

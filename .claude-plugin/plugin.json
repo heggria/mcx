@@ -1,7 +1,7 @@
 {
   "name": "mcx",
-  "description": "Lazy-loaded MCP tool surface for Claude Code: hybrid BM25+embedding search, OAuth 2.1, encrypted token store, audit receipts. Wraps the mcx CLI so Claude only loads N tool schemas instead of hundreds. Run /mcx-install if mcx is missing.",
-  "version": "0.1.0",
+  "description": "Unified semantic catalog for Claude Code: indexes MCP tools AND Claude skills. Lets the model lazy-load both via `mcx search` + `mcx skill show` / `mcx call` instead of dumping every tool schema and every skill description into context at startup. Hybrid BM25 + multilingual embedding (CJK-friendly). Run /mcx-install if missing.",
+  "version": "0.2.0",
   "author": {
     "name": "heggria"
   },

@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { setToken } from '../auth/store.ts';
+import { writeAudit } from '../audit.ts';
 import { deleteToken, listTokenServers } from '../auth/bearer.ts';
 import {
   authorize,
@@ -11,10 +11,10 @@ import {
   registerClient,
   saveOAuthClient,
 } from '../auth/oauth.ts';
+import { setToken } from '../auth/store.ts';
 import { getBackend, loadBackends } from '../config/backends.ts';
 import { withEnvelope } from '../envelope.ts';
 import { callId } from '../util/ids.ts';
-import { writeAudit } from '../audit.ts';
 import { log } from '../util/log.ts';
 
 export function registerAuthCommand(program: Command): void {
@@ -107,7 +107,7 @@ export function registerAuthCommand(program: Command): void {
         }
 
         // 1. Discover (or use overrides from backends.toml)
-        let cached = loadOAuthClient(server);
+        const cached = loadOAuthClient(server);
         let discovery = cached?.discovery;
         if (!discovery) {
           if (backend.auth.authorization_endpoint && backend.auth.token_endpoint) {
@@ -133,7 +133,8 @@ export function registerAuthCommand(program: Command): void {
               scope: backend.auth.scope,
             };
           } else if (discovery.registration_endpoint) {
-            if (!root.json) log.info(`registering client via DCR (${discovery.registration_endpoint})...`);
+            if (!root.json)
+              log.info(`registering client via DCR (${discovery.registration_endpoint})...`);
             client = await registerClient(
               discovery.registration_endpoint,
               'http://127.0.0.1:7654/oauth/callback',

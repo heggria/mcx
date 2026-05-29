@@ -3,20 +3,22 @@ import { catalogDbPath, ensureDirs } from '../util/paths.ts';
 
 /**
  * SQLite catalog with FTS5 BM25 search, backed by Bun's built-in `bun:sqlite`.
- * Bun ships SQLite with FTS5 enabled, so no native compilation is needed.
  *
- * Tables:
- *   - servers       : index status per backend
- *   - tools         : one row per (server, tool); input_schema_json is raw JSON
- *   - auth_tokens   : managed by src/auth/store.ts (defined here for cohesion)
+ * Tables (v3, unified tool + skill catalog):
+ *   - servers           : MCP backend index status
+ *   - skill_roots       : skill scan roots metadata
+ *   - entities          : one row per (kind, source, name) — kind ∈ {'tool','skill'}
+ *   - entity_embeddings : per-entity Float32Array embedding
+ *   - auth_tokens       : managed by src/auth/store.ts
+ *   - oauth_clients     : OAuth 2.1 DCR client registrations
  *
  * FTS5 virtual table:
- *   - tools_fts     : externally-content table, kept in sync via triggers
+ *   - entities_fts : externally-content table, kept in sync via triggers
  *
- * Schema initialized lazily on first open. Migrations track via PRAGMA user_version.
+ * Legacy v2 tables (tools, tool_embeddings, tools_fts) are migrated then dropped.
  */
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -32,45 +34,64 @@ CREATE TABLE IF NOT EXISTS servers (
   last_error  TEXT
 );
 
-CREATE TABLE IF NOT EXISTS tools (
-  id                 INTEGER PRIMARY KEY,
-  server             TEXT NOT NULL REFERENCES servers(name) ON DELETE CASCADE,
-  name               TEXT NOT NULL,
-  description        TEXT,
-  input_schema_json  TEXT,
-  args_text          TEXT,
-  UNIQUE(server, name)
+CREATE TABLE IF NOT EXISTS skill_roots (
+  id          INTEGER PRIMARY KEY,
+  path        TEXT UNIQUE NOT NULL,
+  indexed_at  INTEGER,
+  skill_count INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_tools_server ON tools(server);
+CREATE TABLE IF NOT EXISTS entities (
+  id                  INTEGER PRIMARY KEY,
+  kind                TEXT NOT NULL CHECK(kind IN ('tool','skill')),
+  source              TEXT NOT NULL,
+  name                TEXT NOT NULL,
+  description         TEXT,
+  body_path           TEXT,
+  body_size           INTEGER,
+  args_text           TEXT,
+  input_schema_json   TEXT,
+  triggers            TEXT,
+  updated_at          INTEGER NOT NULL,
+  UNIQUE(kind, source, name)
+);
 
--- FTS5 virtual table; external content tied to tools.id (rowid).
--- Column weights at query time: bm25(tools_fts, 10.0, 3.0, 1.0)
---   name=10  description=3  args_text=1
-CREATE VIRTUAL TABLE IF NOT EXISTS tools_fts USING fts5(
-  name, description, args_text,
-  content='tools',
+CREATE INDEX IF NOT EXISTS idx_entities_kind   ON entities(kind);
+CREATE INDEX IF NOT EXISTS idx_entities_source ON entities(source);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
+  name, description, args_text, triggers,
+  content='entities',
   content_rowid='id',
   tokenize='unicode61 remove_diacritics 2'
 );
 
--- Sync triggers: keep tools_fts mirror in lock-step with tools.
-CREATE TRIGGER IF NOT EXISTS tools_ai AFTER INSERT ON tools BEGIN
-  INSERT INTO tools_fts(rowid, name, description, args_text)
-  VALUES (new.id, new.name, new.description, new.args_text);
+CREATE TRIGGER IF NOT EXISTS entities_ai AFTER INSERT ON entities BEGIN
+  INSERT INTO entities_fts(rowid, name, description, args_text, triggers)
+  VALUES (new.id, new.name, new.description, new.args_text, new.triggers);
 END;
 
-CREATE TRIGGER IF NOT EXISTS tools_ad AFTER DELETE ON tools BEGIN
-  INSERT INTO tools_fts(tools_fts, rowid, name, description, args_text)
-  VALUES ('delete', old.id, old.name, old.description, old.args_text);
+CREATE TRIGGER IF NOT EXISTS entities_ad AFTER DELETE ON entities BEGIN
+  INSERT INTO entities_fts(entities_fts, rowid, name, description, args_text, triggers)
+  VALUES ('delete', old.id, old.name, old.description, old.args_text, old.triggers);
 END;
 
-CREATE TRIGGER IF NOT EXISTS tools_au AFTER UPDATE ON tools BEGIN
-  INSERT INTO tools_fts(tools_fts, rowid, name, description, args_text)
-  VALUES ('delete', old.id, old.name, old.description, old.args_text);
-  INSERT INTO tools_fts(rowid, name, description, args_text)
-  VALUES (new.id, new.name, new.description, new.args_text);
+CREATE TRIGGER IF NOT EXISTS entities_au AFTER UPDATE ON entities BEGIN
+  INSERT INTO entities_fts(entities_fts, rowid, name, description, args_text, triggers)
+  VALUES ('delete', old.id, old.name, old.description, old.args_text, old.triggers);
+  INSERT INTO entities_fts(rowid, name, description, args_text, triggers)
+  VALUES (new.id, new.name, new.description, new.args_text, new.triggers);
 END;
+
+CREATE TABLE IF NOT EXISTS entity_embeddings (
+  entity_id   INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+  model       TEXT NOT NULL,
+  dim         INTEGER NOT NULL,
+  vec         BLOB NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entity_embed_model ON entity_embeddings(model);
 
 CREATE TABLE IF NOT EXISTS auth_tokens (
   server      TEXT PRIMARY KEY,
@@ -81,19 +102,6 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
   last_used   INTEGER
 );
 
--- Phase 2: per-tool embeddings for hybrid search.
--- vec is a packed Float32Array (4 bytes per dim). model + dim let us detect stale
--- embeddings when the user switches providers.
-CREATE TABLE IF NOT EXISTS tool_embeddings (
-  tool_id     INTEGER PRIMARY KEY REFERENCES tools(id) ON DELETE CASCADE,
-  model       TEXT NOT NULL,
-  dim         INTEGER NOT NULL,
-  vec         BLOB NOT NULL,
-  created_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tool_embed_model ON tool_embeddings(model);
-
--- OAuth state: per-server PKCE sessions and DCR client registrations.
 CREATE TABLE IF NOT EXISTS oauth_clients (
   server                  TEXT PRIMARY KEY,
   authorization_endpoint  TEXT NOT NULL,
@@ -117,10 +125,46 @@ export function openCatalog(): Database {
   const row = db.query('PRAGMA user_version').get() as { user_version: number } | null;
   const current = row?.user_version ?? 0;
   if (current < SCHEMA_VERSION) {
+    migrateUp(db, current);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
   cached = db;
   return db;
+}
+
+/** Forward migration. v0 → v3 is no-op (fresh schema). v2 → v3 copies tools → entities. */
+function migrateUp(db: Database, from: number): void {
+  if (from === 2) {
+    try {
+      const hasTools = db
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='tools'")
+        .get();
+      if (hasTools) {
+        db.exec(`
+          INSERT OR IGNORE INTO entities
+            (kind, source, name, description, body_path, body_size,
+             args_text, input_schema_json, triggers, updated_at)
+          SELECT 'tool', 'server:' || server, name, description,
+                 NULL, NULL, args_text, input_schema_json, NULL, ${Date.now()}
+          FROM tools
+        `);
+        db.exec(`
+          INSERT OR IGNORE INTO entity_embeddings (entity_id, model, dim, vec, created_at)
+          SELECT e.id, te.model, te.dim, te.vec, te.created_at
+          FROM tool_embeddings te
+          JOIN tools t ON t.id = te.tool_id
+          JOIN entities e ON e.kind = 'tool'
+                          AND e.source = 'server:' || t.server
+                          AND e.name = t.name
+        `);
+        db.exec('DROP TABLE IF EXISTS tool_embeddings');
+        db.exec('DROP TABLE IF EXISTS tools_fts');
+        db.exec('DROP TABLE IF EXISTS tools');
+      }
+    } catch (e) {
+      process.stderr.write(`mcx: v2→v3 migration partial: ${(e as Error).message}\n`);
+    }
+  }
 }
 
 export function closeCatalog(): void {
@@ -130,11 +174,6 @@ export function closeCatalog(): void {
   }
 }
 
-// Best-effort cleanup on normal process exit. We deliberately DON'T checkpoint
-// the WAL here — Bun's `process.on('exit')` runs synchronously and a forced
-// PRAGMA wal_checkpoint(TRUNCATE) under contention from multiple short-lived
-// CLI invocations was observed to drop committed rows. SQLite's normal
-// auto-checkpoint (WAL passes 1000 frames) handles this safely.
 let exitHooked = false;
 function ensureExitHook(): void {
   if (exitHooked) return;
@@ -152,6 +191,8 @@ function ensureExitHook(): void {
 }
 ensureExitHook();
 
+/* ───────────────── Server / skill-root metadata ───────────────── */
+
 export interface ServerRow {
   name: string;
   transport: string;
@@ -161,29 +202,64 @@ export interface ServerRow {
   last_error: string | null;
 }
 
-export interface ToolRow {
+export interface SkillRootRow {
   id: number;
-  server: string;
-  name: string;
-  description: string | null;
-  input_schema_json: string | null;
-  args_text: string | null;
+  path: string;
+  indexed_at: number | null;
+  skill_count: number;
+  last_error: string | null;
 }
 
-export interface ToolWithScore extends ToolRow {
+export function listServers(): ServerRow[] {
+  return openCatalog().query('SELECT * FROM servers ORDER BY name').all() as ServerRow[];
+}
+
+export function listSkillRoots(): SkillRootRow[] {
+  return openCatalog().query('SELECT * FROM skill_roots ORDER BY path').all() as SkillRootRow[];
+}
+
+/* ───────────────── Unified entity API ───────────────── */
+
+export type EntityKind = 'tool' | 'skill';
+
+export interface EntityRow {
+  id: number;
+  kind: EntityKind;
+  source: string;
+  name: string;
+  description: string | null;
+  body_path: string | null;
+  body_size: number | null;
+  args_text: string | null;
+  input_schema_json: string | null;
+  triggers: string | null;
+  updated_at: number;
+}
+
+export interface EntityWithScore extends EntityRow {
   score: number;
 }
 
-/** Replace all tools for a server in one transaction (for `mcx index`). */
+export interface ToolUpsertInput {
+  name: string;
+  description?: string | undefined;
+  inputSchema?: unknown;
+}
+
+export interface SkillUpsertInput {
+  name: string;
+  description?: string | undefined;
+  triggers?: string | undefined;
+  bodyPath: string;
+  bodySize: number;
+}
+
+/** Replace all tools for one MCP server in a single transaction. */
 export function replaceTools(
   server: string,
   transport: string,
   url: string | null,
-  tools: Array<{
-    name: string;
-    description?: string | undefined;
-    inputSchema?: unknown;
-  }>,
+  tools: ToolUpsertInput[],
   errorIfAny?: string,
 ): void {
   const db = openCatalog();
@@ -197,114 +273,226 @@ export function replaceTools(
        tool_count=excluded.tool_count,
        last_error=excluded.last_error`,
   );
-  const deleteTools = db.prepare('DELETE FROM tools WHERE server = ?');
-  const insertTool = db.prepare(
-    `INSERT INTO tools (server, name, description, input_schema_json, args_text)
-     VALUES (?, ?, ?, ?, ?)`,
+  const deleteOld = db.prepare(`DELETE FROM entities WHERE kind = 'tool' AND source = ?`);
+  const insertEntity = db.prepare(
+    `INSERT INTO entities
+       (kind, source, name, description, body_path, body_size,
+        args_text, input_schema_json, triggers, updated_at)
+     VALUES ('tool', ?, ?, ?, NULL, NULL, ?, ?, NULL, ?)`,
   );
 
+  const source = `server:${server}`;
+  const now = Date.now();
+
   const tx = db.transaction(() => {
-    upsertServer.run(server, transport, url, Date.now(), tools.length, errorIfAny ?? null);
-    deleteTools.run(server);
+    upsertServer.run(server, transport, url, now, tools.length, errorIfAny ?? null);
+    deleteOld.run(source);
     for (const t of tools) {
       const schemaJson = t.inputSchema ? JSON.stringify(t.inputSchema) : null;
       const argsText = extractArgsText(t.inputSchema);
-      insertTool.run(server, t.name, t.description ?? null, schemaJson, argsText);
+      insertEntity.run(source, t.name, t.description ?? null, argsText, schemaJson, now);
     }
   });
   tx();
 }
 
-/** Mark a server as failed without touching its existing tool rows. */
+/** Replace all skills for one skill-root in a single transaction. */
+export function replaceSkills(rootPath: string, skills: SkillUpsertInput[]): SkillRootRow {
+  const db = openCatalog();
+  const now = Date.now();
+
+  const upsertRoot = db.prepare(
+    `INSERT INTO skill_roots (path, indexed_at, skill_count, last_error)
+     VALUES (?, ?, ?, NULL)
+     ON CONFLICT(path) DO UPDATE SET
+       indexed_at=excluded.indexed_at,
+       skill_count=excluded.skill_count,
+       last_error=NULL
+     RETURNING id`,
+  );
+
+  const tx = db.transaction(() => {
+    const rootRow = upsertRoot.get(rootPath, now, skills.length) as { id: number };
+    const source = `skill-root:${rootRow.id}`;
+
+    db.prepare(`DELETE FROM entities WHERE kind = 'skill' AND source = ?`).run(source);
+
+    const insertEntity = db.prepare(
+      `INSERT INTO entities
+         (kind, source, name, description, body_path, body_size,
+          args_text, input_schema_json, triggers, updated_at)
+       VALUES ('skill', ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    );
+    for (const s of skills) {
+      insertEntity.run(
+        source,
+        s.name,
+        s.description ?? null,
+        s.bodyPath,
+        s.bodySize,
+        s.triggers ?? null,
+        now,
+      );
+    }
+    return rootRow;
+  });
+
+  const root = tx();
+  return db.prepare('SELECT * FROM skill_roots WHERE id = ?').get(root.id) as SkillRootRow;
+}
+
 export function markServerError(
   server: string,
   transport: string,
   url: string | null,
   msg: string,
 ): void {
-  const db = openCatalog();
-  const upsertServer = db.prepare(
-    `INSERT INTO servers (name, transport, url, indexed_at, tool_count, last_error)
+  openCatalog()
+    .prepare(
+      `INSERT INTO servers (name, transport, url, indexed_at, tool_count, last_error)
      VALUES (?, ?, ?, ?, COALESCE((SELECT tool_count FROM servers WHERE name = ?), 0), ?)
      ON CONFLICT(name) DO UPDATE SET
        transport=excluded.transport,
        url=excluded.url,
        indexed_at=excluded.indexed_at,
        last_error=excluded.last_error`,
-  );
-  upsertServer.run(server, transport, url, Date.now(), server, msg);
+    )
+    .run(server, transport, url, Date.now(), server, msg);
 }
 
-export function listServers(): ServerRow[] {
-  return openCatalog().query('SELECT * FROM servers ORDER BY name').all() as ServerRow[];
+export function markSkillRootError(rootPath: string, msg: string): void {
+  openCatalog()
+    .prepare(
+      `INSERT INTO skill_roots (path, indexed_at, skill_count, last_error)
+     VALUES (?, ?, COALESCE((SELECT skill_count FROM skill_roots WHERE path = ?), 0), ?)
+     ON CONFLICT(path) DO UPDATE SET
+       indexed_at=excluded.indexed_at,
+       last_error=excluded.last_error`,
+    )
+    .run(rootPath, Date.now(), rootPath, msg);
 }
 
-export function listTools(server?: string): ToolRow[] {
+export interface ListEntitiesOptions {
+  kind?: EntityKind;
+  source?: string;
+}
+
+export function listEntities(opts: ListEntitiesOptions = {}): EntityRow[] {
   const db = openCatalog();
-  if (server) {
-    return db
-      .query('SELECT * FROM tools WHERE server = ? ORDER BY name')
-      .all(server) as ToolRow[];
+  const where: string[] = [];
+  const args: (string | number | null)[] = [];
+  if (opts.kind) {
+    where.push('kind = ?');
+    args.push(opts.kind);
   }
-  return db.query('SELECT * FROM tools ORDER BY server, name').all() as ToolRow[];
+  if (opts.source) {
+    where.push('source = ?');
+    args.push(opts.source);
+  }
+  const sql = `SELECT * FROM entities ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY kind, source, name`;
+  return db.query(sql).all(...args) as EntityRow[];
+}
+
+export function findEntity(kind: EntityKind, name: string, source?: string): EntityRow | undefined {
+  const db = openCatalog();
+  if (source) {
+    const r = db
+      .query('SELECT * FROM entities WHERE kind = ? AND name = ? AND source = ?')
+      .get(kind, name, source);
+    return (r ?? undefined) as EntityRow | undefined;
+  }
+  const r = db
+    .query('SELECT * FROM entities WHERE kind = ? AND name = ? ORDER BY source LIMIT 1')
+    .get(kind, name);
+  return (r ?? undefined) as EntityRow | undefined;
+}
+
+/** Convenience: shape that legacy callers expect (server + name). */
+export interface ToolRow {
+  id: number;
+  server: string;
+  name: string;
+  description: string | null;
+  input_schema_json: string | null;
+  args_text: string | null;
 }
 
 export function findTool(server: string, tool: string): ToolRow | undefined {
-  const r = openCatalog()
-    .query('SELECT * FROM tools WHERE server = ? AND name = ?')
-    .get(server, tool);
-  return (r ?? undefined) as ToolRow | undefined;
+  const e = findEntity('tool', tool, `server:${server}`);
+  if (!e) return undefined;
+  return entityToToolRow(e);
 }
 
-/**
- * BM25 search across name (10), description (3), args_text (1).
- * FTS5 returns negative scores; ORDER BY ASC so most-relevant first.
- */
+export function listTools(server?: string): ToolRow[] {
+  const opts: ListEntitiesOptions = { kind: 'tool' };
+  if (server) opts.source = `server:${server}`;
+  return listEntities(opts).map(entityToToolRow);
+}
+
+function entityToToolRow(e: EntityRow): ToolRow {
+  if (!e.source.startsWith('server:')) {
+    throw new Error(`entity ${e.id} has unexpected tool source: ${e.source}`);
+  }
+  return {
+    id: e.id,
+    server: e.source.slice('server:'.length),
+    name: e.name,
+    description: e.description,
+    input_schema_json: e.input_schema_json,
+    args_text: e.args_text,
+  };
+}
+
+/** BM25 hybrid search. Optionally filter by kind and/or source. */
+export interface SearchEntitiesOptions {
+  topN?: number;
+  kind?: EntityKind;
+  source?: string;
+}
+
+export function searchEntities(query: string, opts: SearchEntitiesOptions = {}): EntityWithScore[] {
+  const db = openCatalog();
+  const topN = opts.topN ?? 5;
+  const escaped = escapeFtsQuery(query);
+  const where: string[] = ['entities_fts MATCH ?'];
+  const args: (string | number | null)[] = [escaped];
+  if (opts.kind) {
+    where.push('e.kind = ?');
+    args.push(opts.kind);
+  }
+  if (opts.source) {
+    where.push('e.source = ?');
+    args.push(opts.source);
+  }
+  args.push(topN);
+  return db
+    .query(
+      `SELECT e.*, bm25(entities_fts, 10.0, 3.0, 1.0, 5.0) AS score
+       FROM entities_fts
+       JOIN entities e ON e.id = entities_fts.rowid
+       WHERE ${where.join(' AND ')}
+       ORDER BY score ASC
+       LIMIT ?`,
+    )
+    .all(...args) as EntityWithScore[];
+}
+
+/** Legacy wrapper. */
+export interface ToolWithScore extends ToolRow {
+  score: number;
+}
+
 export function searchTools(
   query: string,
   opts: { topN?: number; server?: string } = {},
 ): ToolWithScore[] {
-  const db = openCatalog();
-  const topN = opts.topN ?? 5;
-  const escaped = escapeFtsQuery(query);
-  if (opts.server) {
-    return db
-      .query(
-        `SELECT t.*, bm25(tools_fts, 10.0, 3.0, 1.0) AS score
-         FROM tools_fts
-         JOIN tools t ON t.id = tools_fts.rowid
-         WHERE tools_fts MATCH ? AND t.server = ?
-         ORDER BY score ASC
-         LIMIT ?`,
-      )
-      .all(escaped, opts.server, topN) as ToolWithScore[];
-  }
-  return db
-    .query(
-      `SELECT t.*, bm25(tools_fts, 10.0, 3.0, 1.0) AS score
-       FROM tools_fts
-       JOIN tools t ON t.id = tools_fts.rowid
-       WHERE tools_fts MATCH ?
-       ORDER BY score ASC
-       LIMIT ?`,
-    )
-    .all(escaped, topN) as ToolWithScore[];
+  const searchOpts: SearchEntitiesOptions = { kind: 'tool' };
+  if (opts.topN !== undefined) searchOpts.topN = opts.topN;
+  if (opts.server) searchOpts.source = `server:${opts.server}`;
+  const ents = searchEntities(query, searchOpts);
+  return ents.map((e) => ({ ...entityToToolRow(e), score: e.score }));
 }
 
-/**
- * FTS5 query escaping. We adopt a pragmatic strategy:
- *   - Strip FTS5-reserved punctuation that would otherwise break the parser
- *   - Quote each remaining whitespace-separated token to make it a literal
- *   - Join with OR so any-match still ranks via BM25 (top-N stays useful)
- *
- * Trades some power-user features (NEAR, prefix wildcards) for never-crashing
- * on free-form input — exactly what we want from a CLI.
- *
- * Why OR over AND: a query like "take screenshot browser" with implicit AND
- * misses chrome-devtools.take_screenshot because its description never says
- * "browser". OR + BM25 ranking surfaces the right tool first; less-matching
- * tools naturally rank lower.
- */
 function escapeFtsQuery(q: string): string {
   const tokens = q
     .replace(/["'()*?:^]/g, ' ')
@@ -318,10 +506,6 @@ function escapeFtsQuery(q: string): string {
 
 const FTS_KEYWORDS = new Set(['AND', 'OR', 'NOT', 'NEAR']);
 
-/**
- * Build args_text from a JSON Schema input_schema for FTS5 indexing.
- * Concatenates property names + descriptions so search matches argument terms too.
- */
 function extractArgsText(schema: unknown): string | null {
   if (!schema || typeof schema !== 'object') return null;
   const s = schema as { properties?: Record<string, unknown>; required?: string[] };
@@ -337,106 +521,132 @@ function extractArgsText(schema: unknown): string | null {
   return parts.join(' ').slice(0, 4000);
 }
 
-/* ───────────────── Phase 2: embedding storage ───────────────── */
+/* ───────────────── Entity embedding storage ───────────────── */
 
-export interface ToolEmbedding {
-  tool_id: number;
+export interface EntityEmbedding {
+  entity_id: number;
   model: string;
   dim: number;
   vec: Float32Array;
 }
 
-/** Upsert an embedding for a single tool. */
-export function upsertEmbedding(toolId: number, model: string, vec: Float32Array): void {
+export function upsertEmbedding(entityId: number, model: string, vec: Float32Array): void {
   const buf = Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
   openCatalog()
     .prepare(
-      `INSERT INTO tool_embeddings (tool_id, model, dim, vec, created_at)
+      `INSERT INTO entity_embeddings (entity_id, model, dim, vec, created_at)
        VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(tool_id) DO UPDATE SET
+       ON CONFLICT(entity_id) DO UPDATE SET
          model = excluded.model,
          dim = excluded.dim,
          vec = excluded.vec,
          created_at = excluded.created_at`,
     )
-    .run(toolId, model, vec.length, buf, Date.now());
+    .run(entityId, model, vec.length, buf, Date.now());
 }
 
-/** Tools that don't yet have an embedding for the active model. */
-export function toolsMissingEmbedding(model: string): ToolRow[] {
-  return openCatalog()
+export function entitiesMissingEmbedding(model: string, kind?: EntityKind): EntityRow[] {
+  const db = openCatalog();
+  const kindFilter = kind ? 'AND e.kind = ?' : '';
+  const args: (string | number | null)[] = [model];
+  if (kind) args.push(kind);
+  return db
     .query(
-      `SELECT t.* FROM tools t
-       LEFT JOIN tool_embeddings e ON e.tool_id = t.id AND e.model = ?
-       WHERE e.tool_id IS NULL
-       ORDER BY t.server, t.name`,
+      `SELECT e.* FROM entities e
+       LEFT JOIN entity_embeddings emb ON emb.entity_id = e.id AND emb.model = ?
+       WHERE emb.entity_id IS NULL ${kindFilter}
+       ORDER BY e.kind, e.source, e.name`,
     )
-    .all(model) as ToolRow[];
+    .all(...args) as EntityRow[];
 }
 
-/** Bulk-fetch embeddings for a set of tool ids. */
-export function getEmbeddings(toolIds: number[], model: string): Map<number, Float32Array> {
+export function toolsMissingEmbedding(model: string): ToolRow[] {
+  return entitiesMissingEmbedding(model, 'tool').map(entityToToolRow);
+}
+
+export function getEmbeddings(entityIds: number[], model: string): Map<number, Float32Array> {
   const out = new Map<number, Float32Array>();
-  if (toolIds.length === 0) return out;
-  // SQLite parameter limit is 999; chunk if needed.
+  if (entityIds.length === 0) return out;
   const CHUNK = 500;
-  for (let i = 0; i < toolIds.length; i += CHUNK) {
-    const slice = toolIds.slice(i, i + CHUNK);
+  for (let i = 0; i < entityIds.length; i += CHUNK) {
+    const slice = entityIds.slice(i, i + CHUNK);
     const placeholders = slice.map(() => '?').join(',');
     const rows = openCatalog()
       .query(
-        `SELECT tool_id, vec FROM tool_embeddings
-         WHERE model = ? AND tool_id IN (${placeholders})`,
+        `SELECT entity_id, vec FROM entity_embeddings
+         WHERE model = ? AND entity_id IN (${placeholders})`,
       )
-      .all(model, ...slice) as Array<{ tool_id: number; vec: Buffer | Uint8Array }>;
+      .all(model, ...slice) as Array<{ entity_id: number; vec: Buffer | Uint8Array }>;
     for (const r of rows) {
       const u8 = Buffer.isBuffer(r.vec) ? r.vec : Buffer.from(r.vec);
-      out.set(r.tool_id, new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4));
+      out.set(r.entity_id, new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4));
     }
   }
   return out;
 }
 
-/** Stats: how many tools have embeddings vs total. */
 export function embeddingStats(model?: string): {
+  total_entities: number;
   total_tools: number;
+  total_skills: number;
   embedded: number;
   models: Array<{ model: string; count: number }>;
 } {
   const db = openCatalog();
-  const total = (db.query('SELECT count(*) as c FROM tools').get() as { c: number }).c;
+  const total = (db.query('SELECT count(*) as c FROM entities').get() as { c: number }).c;
+  const tools = (
+    db.query("SELECT count(*) as c FROM entities WHERE kind='tool'").get() as { c: number }
+  ).c;
+  const skills = (
+    db.query("SELECT count(*) as c FROM entities WHERE kind='skill'").get() as { c: number }
+  ).c;
   const embedded = model
-    ? (db.query('SELECT count(*) as c FROM tool_embeddings WHERE model = ?').get(model) as {
-        c: number;
-      }).c
-    : (db.query('SELECT count(*) as c FROM tool_embeddings').get() as { c: number }).c;
+    ? (
+        db.query('SELECT count(*) as c FROM entity_embeddings WHERE model = ?').get(model) as {
+          c: number;
+        }
+      ).c
+    : (db.query('SELECT count(*) as c FROM entity_embeddings').get() as { c: number }).c;
   const models = db
-    .query('SELECT model, count(*) as count FROM tool_embeddings GROUP BY model')
+    .query('SELECT model, count(*) as count FROM entity_embeddings GROUP BY model')
     .all() as Array<{ model: string; count: number }>;
-  return { total_tools: total, embedded, models };
+  return { total_entities: total, total_tools: tools, total_skills: skills, embedded, models };
 }
 
-/** Stream all (tool_id, vec) pairs for a model — used by cosine fallback when BM25 misses. */
-export function allEmbeddings(model: string): Array<{ tool_id: number; vec: Float32Array }> {
+export function allEmbeddings(
+  model: string,
+  kind?: EntityKind,
+): Array<{ entity_id: number; vec: Float32Array }> {
+  const sql = kind
+    ? `SELECT ee.entity_id, ee.vec FROM entity_embeddings ee
+       JOIN entities e ON e.id = ee.entity_id AND e.kind = ?
+       WHERE ee.model = ?`
+    : 'SELECT ee.entity_id, ee.vec FROM entity_embeddings ee WHERE ee.model = ?';
+  const args: (string | number | null)[] = kind ? [kind, model] : [model];
   const rows = openCatalog()
-    .query('SELECT tool_id, vec FROM tool_embeddings WHERE model = ?')
-    .all(model) as Array<{ tool_id: number; vec: Buffer | Uint8Array }>;
+    .query(sql)
+    .all(...args) as Array<{ entity_id: number; vec: Buffer | Uint8Array }>;
   return rows.map((r) => {
     const u8 = Buffer.isBuffer(r.vec) ? r.vec : Buffer.from(r.vec);
     return {
-      tool_id: r.tool_id,
+      entity_id: r.entity_id,
       vec: new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength / 4),
     };
   });
 }
 
-/** Hydrate ToolRow objects by id (preserves insertion order of input). */
-export function getToolsByIds(ids: number[]): ToolRow[] {
+export function getEntitiesByIds(ids: number[]): EntityRow[] {
   if (ids.length === 0) return [];
   const placeholders = ids.map(() => '?').join(',');
   const rows = openCatalog()
-    .query(`SELECT * FROM tools WHERE id IN (${placeholders})`)
-    .all(...ids) as ToolRow[];
+    .query(`SELECT * FROM entities WHERE id IN (${placeholders})`)
+    .all(...ids) as EntityRow[];
   const byId = new Map(rows.map((r) => [r.id, r]));
-  return ids.map((i) => byId.get(i)).filter((r): r is ToolRow => !!r);
+  return ids.map((i) => byId.get(i)).filter((r): r is EntityRow => !!r);
+}
+
+export function getToolsByIds(ids: number[]): ToolRow[] {
+  return getEntitiesByIds(ids)
+    .filter((e) => e.kind === 'tool')
+    .map(entityToToolRow);
 }

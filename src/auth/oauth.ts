@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from 'node:crypto';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { exec } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { type IncomingMessage, type ServerResponse, createServer } from 'node:http';
 import { openCatalog } from '../catalog/store.ts';
 import { log } from '../util/log.ts';
 
@@ -122,7 +122,9 @@ async function fetchAuthorizationServerMetadata(origin: string): Promise<OAuthDi
     token_endpoint: j.token_endpoint,
     registration_endpoint:
       typeof j.registration_endpoint === 'string' ? j.registration_endpoint : undefined,
-    scopes_supported: Array.isArray(j.scopes_supported) ? (j.scopes_supported as string[]) : undefined,
+    scopes_supported: Array.isArray(j.scopes_supported)
+      ? (j.scopes_supported as string[])
+      : undefined,
     code_challenge_methods_supported: Array.isArray(j.code_challenge_methods_supported)
       ? (j.code_challenge_methods_supported as string[])
       : undefined,
@@ -258,9 +260,12 @@ function waitForCallback(
   expectedState: string,
 ): Promise<AuthorizeResult> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('OAuth callback timed out after 5 minutes'));
-    }, 5 * 60 * 1000);
+    const timeout = setTimeout(
+      () => {
+        reject(new Error('OAuth callback timed out after 5 minutes'));
+      },
+      5 * 60 * 1000,
+    );
 
     server.on('request', (req: IncomingMessage, res: ServerResponse) => {
       if (!req.url || !req.url.startsWith(REDIRECT_PATH)) {
@@ -274,9 +279,9 @@ function waitForCallback(
       const errorDesc = url.searchParams.get('error_description');
 
       if (error) {
-        res.writeHead(400, { 'Content-Type': 'text/html' }).end(
-          `<h1>Auth failed</h1><p>${escapeHtml(error)}: ${escapeHtml(errorDesc ?? '')}</p>`,
-        );
+        res
+          .writeHead(400, { 'Content-Type': 'text/html' })
+          .end(`<h1>Auth failed</h1><p>${escapeHtml(error)}: ${escapeHtml(errorDesc ?? '')}</p>`);
         clearTimeout(timeout);
         reject(new Error(`OAuth error: ${error} - ${errorDesc ?? ''}`));
         return;
@@ -294,9 +299,9 @@ function waitForCallback(
         return;
       }
 
-      res.writeHead(200, { 'Content-Type': 'text/html' }).end(
-        '<h1>✓ Authorized</h1><p>You can close this tab and return to your terminal.</p>',
-      );
+      res
+        .writeHead(200, { 'Content-Type': 'text/html' })
+        .end('<h1>✓ Authorized</h1><p>You can close this tab and return to your terminal.</p>');
       clearTimeout(timeout);
       resolve({ code, state, receivedAt: Date.now() });
     });
@@ -305,9 +310,11 @@ function waitForCallback(
 
 function openInBrowser(url: string): void {
   const cmd =
-    process.platform === 'darwin' ? `open "${url}"` :
-    process.platform === 'win32' ? `start "" "${url}"` :
-    `xdg-open "${url}"`;
+    process.platform === 'darwin'
+      ? `open "${url}"`
+      : process.platform === 'win32'
+        ? `start "" "${url}"`
+        : `xdg-open "${url}"`;
   exec(cmd, (err) => {
     if (err) log.warn(`failed to auto-open browser: ${err.message}\n  paste manually: ${url}`);
   });
@@ -316,11 +323,16 @@ function openInBrowser(url: string): void {
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => {
     switch (c) {
-      case '&': return '&amp;';
-      case '<': return '&lt;';
-      case '>': return '&gt;';
-      case '"': return '&quot;';
-      default:  return '&#39;';
+      case '&':
+        return '&amp;';
+      case '<':
+        return '&lt;';
+      case '>':
+        return '&gt;';
+      case '"':
+        return '&quot;';
+      default:
+        return '&#39;';
     }
   });
 }
@@ -441,20 +453,16 @@ export function saveOAuthClient(
 export function loadOAuthClient(
   server: string,
 ): { discovery: OAuthDiscovery; client: OAuthClient } | null {
-  const row = openCatalog()
-    .query('SELECT * FROM oauth_clients WHERE server = ?')
-    .get(server) as
-    | {
-        server: string;
-        authorization_endpoint: string;
-        token_endpoint: string;
-        registration_endpoint: string | null;
-        client_id: string;
-        client_secret: string | null;
-        scope: string | null;
-        redirect_uri: string;
-      }
-    | null;
+  const row = openCatalog().query('SELECT * FROM oauth_clients WHERE server = ?').get(server) as {
+    server: string;
+    authorization_endpoint: string;
+    token_endpoint: string;
+    registration_endpoint: string | null;
+    client_id: string;
+    client_secret: string | null;
+    scope: string | null;
+    redirect_uri: string;
+  } | null;
   if (!row) return null;
   return {
     discovery: {
