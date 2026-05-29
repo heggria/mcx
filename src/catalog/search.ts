@@ -1,4 +1,5 @@
 import { cosine, getEmbedder } from './embed.ts';
+import { rerank as llmRerank } from './rerank.ts';
 import {
   type EntityKind,
   type EntityRow,
@@ -31,6 +32,8 @@ export interface HybridResult {
   bm25_score: number | null;
   cosine: number | null;
   rank_source: 'hybrid' | 'cosine_only' | 'bm25_only';
+  /** When set, the LLM reranker bumped this row to this 0-indexed position. */
+  reranked_to?: number;
 }
 
 export interface HybridOptions {
@@ -39,6 +42,10 @@ export interface HybridOptions {
   kind?: EntityKind;
   source?: string;
   noEmbed?: boolean;
+  /** When true, run a second-stage LLM rerank over the top-K candidates. */
+  rerank?: boolean;
+  /** Override rerank candidate pool size (default: max(topN, 10)). */
+  rerankPool?: number;
 }
 
 export interface HybridStatus {
@@ -49,9 +56,58 @@ export interface HybridStatus {
   embedding_model: string | null;
   status: 'ok' | 'degraded';
   notes: string[];
+  /** Set when LLM rerank ran. Includes ok/duration/error. */
+  rerank?: { ok: boolean; duration_ms: number; pool_size: number; error?: string };
 }
 
 export async function hybridSearch(query: string, opts: HybridOptions = {}): Promise<HybridStatus> {
+  const status = await hybridSearchInner(query, opts);
+
+  // Optional second-stage LLM rerank. We only run it when the caller asks for it
+  // (`opts.rerank: true`) AND the inner search produced ≥2 candidates. The
+  // reranker is a wrapper over the existing `results` array — it doesn't
+  // re-fetch anything, just consults an LLM to reorder candidates the search
+  // already found.
+  if (!opts.rerank || status.results.length < 2) return status;
+
+  const poolSize = Math.min(status.results.length, opts.rerankPool ?? Math.max(opts.topN ?? 5, 10));
+  const pool = status.results.slice(0, poolSize);
+  const candidates = pool.map((r) => ({
+    name: r.entity.name,
+    description: r.entity.description,
+    score: r.score,
+  }));
+  const rr = await llmRerank(query, candidates);
+  status.rerank = {
+    ok: rr.ok,
+    duration_ms: rr.duration_ms,
+    pool_size: poolSize,
+    ...(rr.error && { error: rr.error }),
+  };
+  if (!rr.ok) {
+    // Keep original ordering on rerank failure.
+    return status;
+  }
+
+  // Reorder pool based on llmRanked, append the un-reranked tail unchanged.
+  const byName = new Map(pool.map((r) => [r.entity.name, r]));
+  const reorderedPool: HybridResult[] = [];
+  rr.ranked.forEach((name, idx) => {
+    const r = byName.get(name);
+    if (r) reorderedPool.push({ ...r, reranked_to: idx });
+  });
+  // Safety net: include any pool entry the LLM dropped (shouldn't happen).
+  for (const r of pool) {
+    if (!reorderedPool.find((x) => x.entity.name === r.entity.name)) {
+      reorderedPool.push(r);
+    }
+  }
+  const tail = status.results.slice(poolSize);
+  status.results = [...reorderedPool, ...tail];
+  return status;
+}
+
+async function hybridSearchInner(query: string, opts: HybridOptions = {}): Promise<HybridStatus> {
   const topN = Math.max(1, Math.min(50, opts.topN ?? 5));
   const rerankTop = Math.max(topN, Math.min(200, opts.rerankTop ?? 50));
   const notes: string[] = [];

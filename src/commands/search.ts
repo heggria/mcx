@@ -14,6 +14,8 @@ export function registerSearchCommand(program: Command): void {
     .option('-s, --server <name>', 'restrict to one MCP backend (implies --kind tool)')
     .option('--rerank-top <n>', 'BM25 candidate pool size before rerank', '50')
     .option('--no-embed', 'pure BM25, skip embedding rerank')
+    .option('--rerank', 'second-stage LLM rerank over top-K (requires ANTHROPIC_AUTH_TOKEN)')
+    .option('--rerank-pool <n>', 'how many top results to feed the LLM reranker', '10')
     .option('--full-schema', 'include full input_schema_json in each result (tools only)')
     .action(
       async (
@@ -24,6 +26,8 @@ export function registerSearchCommand(program: Command): void {
           server?: string;
           rerankTop?: string;
           embed?: boolean;
+          rerank?: boolean;
+          rerankPool?: string;
           fullSchema?: boolean;
         },
       ) => {
@@ -47,10 +51,16 @@ export function registerSearchCommand(program: Command): void {
             kind?: EntityKind;
             source?: string;
             noEmbed?: boolean;
+            rerank?: boolean;
+            rerankPool?: number;
           } = { topN, rerankTop };
           if (kind) searchOpts.kind = kind;
           if (source) searchOpts.source = source;
           if (opts.embed === false) searchOpts.noEmbed = true;
+          if (opts.rerank) {
+            searchOpts.rerank = true;
+            searchOpts.rerankPool = Math.max(2, Math.min(20, Number(opts.rerankPool ?? 10)));
+          }
           const out = await hybridSearch(query, searchOpts);
 
           const results = out.results.map((r) => {
@@ -64,6 +74,7 @@ export function registerSearchCommand(program: Command): void {
               bm25_score: r.bm25_score !== null ? Number(r.bm25_score.toFixed(4)) : null,
               cosine: r.cosine !== null ? Number(r.cosine.toFixed(4)) : null,
               rank_source: r.rank_source,
+              ...(r.reranked_to !== undefined && { reranked_to: r.reranked_to }),
             };
 
             // Tool-specific fields
@@ -110,6 +121,7 @@ export function registerSearchCommand(program: Command): void {
             bm25_hits: out.bm25_hits,
             status: out.status,
             notes: out.notes,
+            ...(out.rerank && { rerank: out.rerank }),
             results,
           };
         });
