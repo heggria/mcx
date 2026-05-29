@@ -12,7 +12,7 @@ export function registerSearchCommand(program: Command): void {
     .option('-n, --top <n>', 'top N results', '5')
     .option('-k, --kind <kind>', 'restrict to one kind: tool | skill')
     .option('-s, --server <name>', 'restrict to one MCP backend (implies --kind tool)')
-    .option('--rerank-top <n>', 'BM25 candidate pool size before rerank', '20')
+    .option('--rerank-top <n>', 'BM25 candidate pool size before rerank', '50')
     .option('--no-embed', 'pure BM25, skip embedding rerank')
     .option('--full-schema', 'include full input_schema_json in each result (tools only)')
     .action(
@@ -31,7 +31,7 @@ export function registerSearchCommand(program: Command): void {
         const start = Date.now();
         const root = program.opts<{ json?: boolean }>();
         const topN = Math.max(1, Math.min(50, Number(opts.top ?? 5)));
-        const rerankTop = Math.max(topN, Math.min(200, Number(opts.rerankTop ?? 20)));
+        const rerankTop = Math.max(topN, Math.min(200, Number(opts.rerankTop ?? 50)));
 
         const kind: EntityKind | undefined = opts.server
           ? 'tool'

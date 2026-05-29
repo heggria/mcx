@@ -53,13 +53,19 @@ export interface HybridStatus {
 
 export async function hybridSearch(query: string, opts: HybridOptions = {}): Promise<HybridStatus> {
   const topN = Math.max(1, Math.min(50, opts.topN ?? 5));
-  const rerankTop = Math.max(topN, Math.min(200, opts.rerankTop ?? 20));
+  const rerankTop = Math.max(topN, Math.min(200, opts.rerankTop ?? 50));
   const notes: string[] = [];
 
   const bm25Opts: { topN: number; kind?: EntityKind; source?: string } = { topN: rerankTop };
   if (opts.kind) bm25Opts.kind = opts.kind;
   if (opts.source) bm25Opts.source = opts.source;
-  const bm25 = searchEntities(query, bm25Opts);
+
+  // CJK-heavy queries: the unicode61 tokenizer can't split "飞书消息" so BM25
+  // routinely returns 0 hits for Chinese-only input. Skip BM25 entirely and
+  // go straight to cosine — same end result, half the work.
+  const cjkHeavy = isCjkHeavyQuery(query);
+  const bm25 = cjkHeavy ? [] : searchEntities(query, bm25Opts);
+  if (cjkHeavy) notes.push('CJK-heavy query — skipped BM25, going straight to cosine');
 
   if (opts.noEmbed) {
     return {
@@ -203,4 +209,33 @@ export async function hybridSearch(query: string, opts: HybridOptions = {}): Pro
     status: 'ok',
     notes: bm25.length === 0 ? [...notes, 'BM25 had 0 hits — cosine-only ranking'] : notes,
   };
+}
+
+/**
+ * Heuristic: a query is "CJK-heavy" when ≥30% of its non-whitespace characters
+ * are CJK (Han + Kana + Hangul). The current SQLite unicode61 tokenizer doesn't
+ * split adjacent CJK characters, so BM25 against a CJK-heavy query reliably
+ * returns 0 hits. We detect that up-front and skip BM25 to save the work.
+ *
+ * Mixed queries like "提交 git commit" still go through BM25 because the English
+ * portion is enough for the FTS to find candidates the rerank can shape further.
+ */
+function isCjkHeavyQuery(q: string): boolean {
+  const stripped = q.replace(/\s+/g, '');
+  if (stripped.length === 0) return false;
+  let cjk = 0;
+  for (const ch of stripped) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (
+      (code >= 0x3040 && code <= 0x30ff) || // Hiragana + Katakana
+      (code >= 0x3400 && code <= 0x4dbf) || // CJK Ext A
+      (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified
+      (code >= 0xac00 && code <= 0xd7af) || // Hangul
+      (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility
+      (code >= 0x20000 && code <= 0x2a6df) // CJK Ext B
+    ) {
+      cjk++;
+    }
+  }
+  return cjk / [...stripped].length >= 0.3;
 }

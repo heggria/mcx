@@ -39,14 +39,39 @@ export async function getEmbedder(): Promise<Embedder> {
 
 /* ───────────────── Local (transformers.js) ───────────────── */
 
+/**
+ * Local embedding model registry. Pick via env `MCX_EMBED_MODEL=<key>`.
+ *
+ * Default: `multilingual` (e5-small, 118MB, 384-d).
+ *
+ * Model selection notes (informed by mcx-internal benchmarks on a CN-EN mixed
+ * skill catalog of ~200 entries):
+ *
+ *   - e5-small (default): 7/9 top-1 hit rate on Chinese queries against a CN-EN
+ *     mixed catalog. The multilingual training shines when queries are CN but
+ *     skill names are EN, because cross-lingual alignment is its specialty.
+ *
+ *   - e5-base: same family, 768-d, ~279MB. Marginal upgrade over small. Worth it
+ *     when catalog grows past ~1k entries.
+ *
+ *   - bge-m3: 1024-d, ~570MB. SOTA on MTEB but in our internal test it underperforms
+ *     e5 on CN-EN mixed retrieval — its "Chinese specialization" hurts cross-lingual
+ *     alignment. Recommended only if catalog is overwhelmingly Chinese.
+ *
+ *   - english (all-MiniLM-L6-v2): 25MB, 384-d, EN-only.
+ */
 const LOCAL_MODELS = {
-  multilingual: 'Xenova/multilingual-e5-small',
-  english: 'Xenova/all-MiniLM-L6-v2',
+  multilingual: { id: 'Xenova/multilingual-e5-small', dim: 384 },
+  'e5-base':    { id: 'Xenova/multilingual-e5-base', dim: 768 },
+  'bge-m3':     { id: 'Xenova/bge-m3', dim: 1024 },
+  english:      { id: 'Xenova/all-MiniLM-L6-v2', dim: 384 },
 } as const;
 
 async function makeLocalEmbedder(): Promise<Embedder> {
   const choice = (process.env.MCX_EMBED_MODEL ?? 'multilingual') as keyof typeof LOCAL_MODELS;
-  const modelId = LOCAL_MODELS[choice] ?? LOCAL_MODELS.multilingual;
+  const spec = LOCAL_MODELS[choice] ?? LOCAL_MODELS.multilingual;
+  const modelId = spec.id;
+  const dim = spec.dim;
   ensureDirs();
 
   // Tell transformers.js where to cache. Defaults to ./.cache; we redirect to XDG cache.
@@ -60,12 +85,13 @@ async function makeLocalEmbedder(): Promise<Embedder> {
 
   const pipeline = await tx.pipeline('feature-extraction', modelId);
   // E5 family expects "query: " for queries and "passage: " for documents.
+  // BGE family doesn't use query prefixes (or uses different ones).
   // Mixing them up significantly hurts cross-lingual retrieval quality.
   const useE5Prefix = modelId.includes('e5');
 
   return {
     model: `local:${modelId}`,
-    dim: 384, // both default models we use are 384-d
+    dim,
     embed: async (texts: string[], inputType: InputType = 'passage'): Promise<Float32Array[]> => {
       const prepared = useE5Prefix ? texts.map((t) => `${inputType}: ${t}`) : texts;
       // Process one at a time to keep memory bounded; transformers.js batches internally.
